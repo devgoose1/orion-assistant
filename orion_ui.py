@@ -20,9 +20,26 @@ from PySide6.QtWidgets import (
     QTextEdit, QLineEdit, QLabel, QPushButton, QFrame, QGraphicsDropShadowEffect,
     QSizePolicy
 )
-from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QPropertyAnimation, QEasingCurve, Property, QUrl
 from PySide6.QtGui import (QPainter, QColor, QPen, QFont, QLinearGradient, QPalette, QBrush, QImage,
                            QVector3D, QMatrix4x4, QTextCursor)
+
+# Try to import QtWebEngine for embedded browser
+WEBENGINE_IMPORT_ERROR = None
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    WEBENGINE_AVAILABLE = True
+except ImportError as e:
+    WEBENGINE_AVAILABLE = False
+    WEBENGINE_IMPORT_ERROR = str(e)
+    QWebEngineView = None  # type: ignore
+    QWebEnginePage = None  # type: ignore
+    print("WARNING: QtWebEngine not available. Install PySide6 with WebEngine support.")
+    print(f"         Import error: {e}")
+
+print(f">>> [DEBUG] Python executable: {sys.executable}")
+print(f">>> [DEBUG] WEBENGINE_AVAILABLE: {WEBENGINE_AVAILABLE}")
 
 # Import backend logic
 from main import ConversationMemory
@@ -518,13 +535,17 @@ class OrionMainWindow(QMainWindow):
         except Exception as e:
             print(f"Warning: Could not initialize memory: {e}")
         
-        # Setup UI
-        self.setup_ui()
-        self.apply_holographic_theme()
-        
         # Current worker threads
         self.worker = None
         self.tts_worker = None
+
+        # Browser widget reference
+        self.browser = None
+        self.browser_placeholder = None
+
+        # Setup UI
+        self.setup_ui()
+        self.apply_holographic_theme()
         
     def setup_ui(self):
         """Setup the main UI layout"""
@@ -665,21 +686,39 @@ class OrionMainWindow(QMainWindow):
         self.update_stats()
         right_layout.addWidget(self.stats_display)
         
-        # Video label (placeholder for future camera integration)
-        self.video_label = QLabel()
-        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_label.setStyleSheet("""
+        # Integrated Browser
+        browser_header = QLabel("⬢ WEB INTERFACE ⬢")
+        browser_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        browser_header.setStyleSheet("""
             QLabel {
-                background-color: rgba(0, 0, 0, 100);
-                border: 2px solid rgba(0, 191, 255, 80);
-                border-radius: 8px;
-                color: #00BFFF;
+                color: #00FFFF;
                 font-size: 12px;
+                font-weight: bold;
+                padding: 8px;
+                font-family: 'Consolas', monospace;
+                letter-spacing: 2px;
             }
         """)
-        self.video_label.setText("◊ VISUAL FEED ◊\n\n[OFFLINE]")
-        self.video_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        right_layout.addWidget(self.video_label, stretch=1)
+        right_layout.addWidget(browser_header)
+        
+        self.browser_controls_container = QWidget()
+        self.browser_controls_layout = QHBoxLayout(self.browser_controls_container)
+        self.browser_controls_layout.setContentsMargins(0, 0, 0, 0)
+        self.browser_controls_layout.setSpacing(5)
+        self.browser_controls_container.setVisible(False)
+        right_layout.addWidget(self.browser_controls_container)
+
+        self.browser_container = QFrame()
+        self.browser_container.setObjectName("browser_container")
+        self.browser_container_layout = QVBoxLayout(self.browser_container)
+        self.browser_container_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(self.browser_container, stretch=1)
+
+        if WEBENGINE_AVAILABLE and QWebEngineView is not None:
+            self._init_embedded_browser()
+        else:
+            self.browser = None
+            self._show_browser_placeholder()
         
         # Hexagon decoration
         hex_widget = HexagonWidget()
@@ -690,6 +729,198 @@ class OrionMainWindow(QMainWindow):
         main_layout.addWidget(left_panel, stretch=2)
         main_layout.addWidget(middle_panel, stretch=5)
         main_layout.addWidget(right_panel, stretch=3)
+    
+    def load_browser_home(self):
+        """Load the home page in the browser"""
+        if not self._ensure_embedded_browser():
+            return
+        self._set_browser_home()
+
+    def _ensure_embedded_browser(self):
+        """Try to enable the embedded browser if possible."""
+        if WEBENGINE_AVAILABLE and self.browser:
+            return True
+        if not self._try_enable_webengine():
+            self._show_browser_placeholder()
+            return False
+        return self._init_embedded_browser()
+
+    def _try_enable_webengine(self):
+        """Attempt to import QtWebEngine at runtime."""
+        global WEBENGINE_AVAILABLE, WEBENGINE_IMPORT_ERROR, QWebEngineView, QWebEnginePage
+        if WEBENGINE_AVAILABLE and QWebEngineView is not None:
+            return True
+        try:
+            from PySide6.QtWebEngineWidgets import QWebEngineView as _QWebEngineView
+            from PySide6.QtWebEngineCore import QWebEnginePage as _QWebEnginePage
+            QWebEngineView = _QWebEngineView
+            QWebEnginePage = _QWebEnginePage
+            WEBENGINE_AVAILABLE = True
+            WEBENGINE_IMPORT_ERROR = None
+            return True
+        except ImportError as e:
+            WEBENGINE_AVAILABLE = False
+            WEBENGINE_IMPORT_ERROR = repr(e)
+            return False
+
+    def _init_embedded_browser(self):
+        """Create and mount the embedded browser widget."""
+        if not WEBENGINE_AVAILABLE or QWebEngineView is None or self.browser:
+            return False
+
+        if hasattr(self, "browser_placeholder") and self.browser_placeholder is not None:
+            self.browser_placeholder.setParent(None)
+            self.browser_placeholder = None
+
+        self.browser = QWebEngineView()
+        self.browser.setStyleSheet("""
+            QWebEngineView {
+                background-color: rgba(0, 0, 0, 100);
+                border: 2px solid rgba(0, 191, 255, 80);
+                border-radius: 8px;
+            }
+        """)
+        self.browser_container_layout.addWidget(self.browser)
+        self._ensure_browser_controls()
+        self._set_browser_home()
+        return True
+
+    def _ensure_browser_controls(self):
+        """Create the browser control buttons when WebEngine is available."""
+        if self.browser_controls_container.isVisible() or not self.browser:
+            return
+
+        back_btn = QPushButton("◄")
+        back_btn.setFixedWidth(40)
+        back_btn.setToolTip("Back")
+        back_btn.clicked.connect(self.browser.back)
+        back_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(0, 100, 150, 120);
+                border: 1px solid rgba(0, 191, 255, 100);
+                border-radius: 4px;
+                color: #00FFFF;
+                font-size: 14px;
+                padding: 5px;
+            }
+            QPushButton:hover { background-color: rgba(0, 150, 200, 150); }
+        """)
+
+        forward_btn = QPushButton("►")
+        forward_btn.setFixedWidth(40)
+        forward_btn.setToolTip("Forward")
+        forward_btn.clicked.connect(self.browser.forward)
+        forward_btn.setStyleSheet(back_btn.styleSheet())
+
+        refresh_btn = QPushButton("⟳")
+        refresh_btn.setFixedWidth(40)
+        refresh_btn.setToolTip("Refresh")
+        refresh_btn.clicked.connect(self.browser.reload)
+        refresh_btn.setStyleSheet(back_btn.styleSheet())
+
+        home_btn = QPushButton("⌂")
+        home_btn.setFixedWidth(40)
+        home_btn.setToolTip("Home")
+        home_btn.clicked.connect(self.load_browser_home)
+        home_btn.setStyleSheet(back_btn.styleSheet())
+
+        self.browser_controls_layout.addWidget(back_btn)
+        self.browser_controls_layout.addWidget(forward_btn)
+        self.browser_controls_layout.addWidget(refresh_btn)
+        self.browser_controls_layout.addWidget(home_btn)
+        self.browser_controls_layout.addStretch()
+        self.browser_controls_container.setVisible(True)
+
+    def _set_browser_home(self):
+        """Set the embedded browser home page."""
+        if not self.browser:
+            return
+        self.browser.setHtml("""
+            <html>
+            <head>
+                <style>
+                    body {
+                        background: linear-gradient(135deg, #0a0a1a 0%, #10182a 100%);
+                        color: #00FFFF;
+                        font-family: 'Consolas', monospace;
+                        display: flex;
+                        justify-content: center;
+                        align-items: center;
+                        height: 100vh;
+                        margin: 0;
+                    }
+                    .container {
+                        text-align: center;
+                        padding: 20px;
+                    }
+                    h1 {
+                        font-size: 24px;
+                        margin-bottom: 10px;
+                        text-shadow: 0 0 10px #00FFFF;
+                    }
+                    p {
+                        color: #87CEEB;
+                        font-size: 14px;
+                    }
+                    .pulse {
+                        width: 60px;
+                        height: 60px;
+                        border: 3px solid #00FFFF;
+                        border-radius: 50%;
+                        margin: 20px auto;
+                        animation: pulse 2s infinite;
+                    }
+                    @keyframes pulse {
+                        0%, 100% { transform: scale(1); opacity: 1; }
+                        50% { transform: scale(1.1); opacity: 0.7; }
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="pulse"></div>
+                    <h1>⬡ ORION WEB INTERFACE ⬡</h1>
+                    <p>Browser ready for navigation</p>
+                    <p style="margin-top: 20px; font-size: 12px; color: #00BFFF;">Ask me to open a website...</p>
+                </div>
+            </body>
+            </html>
+        """)
+
+    def _show_browser_placeholder(self):
+        """Show a placeholder when WebEngine is not available."""
+        if hasattr(self, "browser") and self.browser:
+            self.browser.setParent(None)
+            self.browser = None
+
+        if not hasattr(self, "browser_placeholder") or self.browser_placeholder is None:
+            self.browser_placeholder = QLabel()
+            self.browser_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.browser_placeholder.setStyleSheet("""
+                QLabel {
+                    background-color: rgba(0, 0, 0, 100);
+                    border: 2px solid rgba(0, 191, 255, 80);
+                    border-radius: 8px;
+                    color: #00BFFF;
+                    font-size: 11px;
+                    padding: 20px;
+                }
+            """)
+            self.browser_container_layout.addWidget(self.browser_placeholder)
+
+        error_line = f"Import error: {WEBENGINE_IMPORT_ERROR}\n\n" if WEBENGINE_IMPORT_ERROR else ""
+        self.browser_placeholder.setText(
+            "◊ WEB BROWSER ◊\n\n"
+            "[NOT AVAILABLE]\n\n"
+            "QtWebEngine is not available.\n\n"
+            f"Python: {sys.executable}\n\n"
+            f"{error_line}"
+            "Fix your PySide6 install\n"
+            "to enable the integrated browser.\n\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "Required in env:\n"
+            "• PySide6 with QtWebEngine"
+        )
         
     def apply_holographic_theme(self):
         """Apply dark holographic theme to the main window"""
@@ -1050,10 +1281,17 @@ class OrionMainWindow(QMainWindow):
                 url = 'https://' + url
             
             print(f">>> [DEBUG] Opening URL: {url}")
-            webbrowser.open(url, new=2)  # new=2 opens in new tab
-            print(f">>> [DEBUG] Browser command sent for: {url}")
             
-            return {"status": "success", "message": f"Opened '{url}'."}
+            # Use integrated browser if available
+            if self._ensure_embedded_browser() and self.browser:
+                self.browser.setUrl(QUrl(url))
+                print(f">>> [DEBUG] URL loaded in integrated browser: {url}")
+                return {"status": "success", "message": f"Opened '{url}' in integrated browser."}
+
+            print(">>> [ERROR] Integrated browser not available. QtWebEngine import failed.")
+            detail = f"Python: {sys.executable}. Import error: {WEBENGINE_IMPORT_ERROR}" if WEBENGINE_IMPORT_ERROR else f"Python: {sys.executable}"
+            return {"status": "error", "message": f"Integrated browser not available. {detail}"}
+            
         except Exception as e:
             print(f">>> [ERROR] Failed to open website: {e}")
             return {"status": "error", "message": f"Error: {str(e)}"}
