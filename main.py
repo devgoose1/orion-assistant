@@ -62,7 +62,7 @@ class ConversationMemory:
         
         self.conn.commit()
     
-    def save_exchange(self, user_message: str, bot_response: str, session_id: str = None):
+    def save_exchange(self, user_message: str, bot_response: str, session_id: Optional[str] = None):
         """Save a conversation exchange to the database"""
         cursor = self.conn.cursor()
         cursor.execute('''
@@ -150,17 +150,20 @@ class ConversationMemory:
         """Close database connection"""
         self.conn.close()
 
-def get_local_llm_response(prompt: str, model: str = "qwen:1.5b", base_url: str = "http://localhost:11434", context: str = "") -> str:
+def get_local_llm_response(prompt: str, model: str = "qwen:1.5b", base_url: str = "http://localhost:11434", conversation_history: Optional[List[dict]] = None) -> str:
     """Get response from locally hosted LLM (Ollama)"""
     try:
-        url = f"{base_url}/api/generate"
+        url = f"{base_url}/api/chat"
         
-        # Include context in the prompt if available
-        full_prompt = f"{context}{prompt}" if context else prompt
+        # Build message history
+        if conversation_history is None:
+            conversation_history = []
+        
+        messages = conversation_history + [{"role": "user", "content": prompt}]
         
         payload = {
             "model": model,
-            "prompt": full_prompt,
+            "messages": messages,
             "stream": False
         }
         
@@ -168,7 +171,7 @@ def get_local_llm_response(prompt: str, model: str = "qwen:1.5b", base_url: str 
         response.raise_for_status()
         
         result = response.json()
-        return result.get("response", "").strip()
+        return result.get("message", {}).get("content", "").strip()
     except requests.exceptions.ConnectionError:
         print(f"\nERROR: Cannot connect to local LLM at {base_url}")
         print("   Make sure Ollama is running: ollama serve")
@@ -280,6 +283,8 @@ def main():
 
     # Initialize LLM
     chat = None  # Initialize for type checking
+    conversation_history = []  # Track conversation history for local LLM
+    
     if USE_LOCAL_LLM:
         print(f" INFO: Using local LLM ({LOCAL_LLM_MODEL} via Ollama)")
         print(f"   Endpoint: {LOCAL_LLM_URL}")
@@ -339,18 +344,15 @@ def main():
                     print(f"Bot: No conversations found matching '{query}'\n")
                 continue
         
-        # Get conversation context from memory
-        context = ""
-        if USE_MEMORY and memory:
-            history = memory.get_recent_history(MEMORY_CONTEXT_SIZE)
-            context = memory.format_history_for_context(history, MEMORY_CONTEXT_SIZE)
-
         # Get LLM response
         response_text = ""
         if USE_LOCAL_LLM:
-            response_text = get_local_llm_response(user_input, LOCAL_LLM_MODEL, LOCAL_LLM_URL, context)
+            response_text = get_local_llm_response(user_input, LOCAL_LLM_MODEL, LOCAL_LLM_URL, conversation_history)
             if response_text:
                 print(f"Bot: {response_text}\n")
+                # Update conversation history
+                conversation_history.append({"role": "user", "content": user_input})
+                conversation_history.append({"role": "assistant", "content": response_text})
         else:
             if chat is not None:
                 # For Gemini, we'd need to maintain conversation history differently
