@@ -542,6 +542,7 @@ class OrionMainWindow(QMainWindow):
         # Browser widget reference
         self.browser = None
         self.browser_placeholder = None
+        self.browser_base_width = 900
 
         # Setup UI
         self.setup_ui()
@@ -648,7 +649,8 @@ class OrionMainWindow(QMainWindow):
         # === RIGHT PANEL: Stats & Video ===
         right_panel = QFrame()
         right_panel.setObjectName("right_panel")
-        right_panel.setMaximumWidth(420)
+        right_panel.setMaximumWidth(560)
+        right_panel.setMinimumWidth(480)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(15, 15, 15, 15)
         right_layout.setSpacing(15)
@@ -783,6 +785,7 @@ class OrionMainWindow(QMainWindow):
         self.browser_container_layout.addWidget(self.browser)
         self._ensure_browser_controls()
         self._set_browser_home()
+        self._update_browser_zoom()
         return True
 
     def _ensure_browser_controls(self):
@@ -886,6 +889,21 @@ class OrionMainWindow(QMainWindow):
             </body>
             </html>
         """)
+        self._update_browser_zoom()
+
+    def _update_browser_zoom(self):
+        """Scale the web content to better fit the panel width."""
+        if not self.browser:
+            return
+        width = max(self.browser.width(), 1)
+        zoom = width / float(self.browser_base_width)
+        zoom = max(0.6, min(1.2, zoom))
+        self.browser.setZoomFactor(zoom)
+
+    def resizeEvent(self, event):
+        """Keep browser content scaled with the window size."""
+        super().resizeEvent(event)
+        self._update_browser_zoom()
 
     def _show_browser_placeholder(self):
         """Show a placeholder when WebEngine is not available."""
