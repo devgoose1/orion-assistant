@@ -1,6 +1,7 @@
 """
 Orion CAD Designer - Custom Circuit Design Tool
 A built-in CAD system for designing Arduino circuits with AI assistance
+Now with real pin system, code editor, and circuit simulation!
 """
 
 from PySide6.QtWidgets import (
@@ -8,25 +9,53 @@ from PySide6.QtWidgets import (
     QGraphicsItem, QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem,
     QGraphicsTextItem, QPushButton, QLabel, QListWidget, QListWidgetItem,
     QSplitter, QToolBar, QDialog, QLineEdit, QSpinBox, QComboBox,
-    QFormLayout, QDialogButtonBox, QFileDialog, QMessageBox, QGraphicsPixmapItem
+    QFormLayout, QDialogButtonBox, QFileDialog, QMessageBox, QGraphicsPixmapItem,
+    QTextEdit, QTabWidget, QCheckBox
 )
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal, QLineF
+from PySide6.QtCore import Qt, QRectF, QPointF, Signal, QLineF, QTimer
 from PySide6.QtGui import (QPen, QBrush, QColor, QPainter, QPixmap, QFont,
-                           QTransform, QPolygonF)
+                           QTransform, QPolygonF, QSyntaxHighlighter, QTextCharFormat)
 import json
 import math
-from typing import Optional
+import time
+from typing import Optional, Dict, List, Any
+from dataclasses import dataclass
+
+
+# Arduino Pin definitions
+ARDUINO_DIGITAL_PINS = [f"D{i}" for i in range(14)]  # D0-D13
+ARDUINO_ANALOG_PINS = [f"A{i}" for i in range(6)]    # A0-A5
+ARDUINO_POWER_PINS = ["5V", "3.3V", "GND", "VIN"]
+ARDUINO_ALL_PINS = ARDUINO_DIGITAL_PINS + ARDUINO_ANALOG_PINS + ARDUINO_POWER_PINS
+
+
+@dataclass
+class Pin:
+    """Represents a physical pin on a component"""
+    name: str
+    pin_type: str  # "digital", "analog", "power", "gnd"
+    position: QPointF
+    connected_to: Optional['Pin'] = None
+    
+    def can_connect_to(self, other: 'Pin') -> bool:
+        """Check if this pin can connect to another pin"""
+        # GND can connect to GND, 5V to 5V, etc.
+        if self.pin_type == "power" or other.pin_type == "power":
+            return self.name == other.name
+        return True
 
 
 class ComponentItem(QGraphicsRectItem):
-    """Base class for circuit components"""
+    """Base class for circuit components with real pin system"""
     
-    def __init__(self, component_type, x, y, width=60, height=40):
+    def __init__(self, component_type, x, y, width=100, height=80):
         super().__init__(0, 0, width, height)
         self.component_type = component_type
         self.component_id: Optional[str] = None
         self.properties = {}
-        self.pins = []  # Connection points
+        self.pins: List[Pin] = []  # Named pins with types
+        self.pin_graphics = []  # Visual pin indicators
+        self.state = {}  # Component state for simulation
         
         # Make item movable and selectable
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
@@ -36,108 +65,256 @@ class ComponentItem(QGraphicsRectItem):
         # Set position
         self.setPos(x, y)
         
-        # Styling
-        self.setPen(QPen(QColor(0, 191, 255), 2))
-        self.setBrush(QBrush(QColor(20, 40, 80, 200)))
+        # Styling based on component type
+        if "Arduino" in component_type:
+            self.setPen(QPen(QColor(0, 191, 255), 3))
+            self.setBrush(QBrush(QColor(0, 100, 150, 220)))
+        elif component_type == "LED":
+            self.setPen(QPen(QColor(255, 200, 0), 2))
+            self.setBrush(QBrush(QColor(200, 150, 0, 200)))
+        else:
+            self.setPen(QPen(QColor(0, 191, 255), 2))
+            self.setBrush(QBrush(QColor(20, 40, 80, 200)))
         
         # Label
         self.label = QGraphicsTextItem(component_type, self)
         self.label.setDefaultTextColor(QColor(0, 255, 255))
-        self.label.setFont(QFont("Consolas", 9))
-        self.label.setPos(5, height // 2 - 10)
+        self.label.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        self.label.setPos(5, 5)
         
         # Initialize pins based on component type
         self._create_pins()
     
     def _create_pins(self):
-        """Create connection pins for the component"""
+        """Create real Arduino pins with proper labels"""
         width = self.rect().width()
         height = self.rect().height()
         
-        if self.component_type == "Arduino Uno":
-            # Arduino has many pins - simplified to 4 main connection points
+        if "Arduino Uno" in self.component_type or "Arduino Nano" in self.component_type:
+            # Real Arduino pins layout
+            pin_spacing = 15
+            start_y = 25
+            
+            # Left side - Digital pins D0-D7 + GND
+            for i in range(8):
+                pin_y = start_y + i * pin_spacing
+                if pin_y < height - 10:
+                    pin = Pin(f"D{i}", "digital", QPointF(0, pin_y))
+                    self.pins.append(pin)
+                    self._add_pin_visual(pin, True)  # True = show label on left
+            
+            # Add GND on left
+            gnd_y = start_y + 8 * pin_spacing
+            if gnd_y < height - 10:
+                gnd_pin = Pin("GND", "gnd", QPointF(0, gnd_y))
+                self.pins.append(gnd_pin)
+                self._add_pin_visual(gnd_pin, True)
+            
+            # Right side - Digital pins D8-D13, 5V, GND
+            for i in range(8, 14):
+                pin_y = start_y + (i - 8) * pin_spacing
+                if pin_y < height - 10:
+                    pin = Pin(f"D{i}", "digital", QPointF(width, pin_y))
+                    self.pins.append(pin)
+                    self._add_pin_visual(pin, False)  # False = show label on right
+            
+            # Add power on right
+            power_y = start_y + 6 * pin_spacing
+            if power_y < height - 10:
+                v5_pin = Pin("5V", "power", QPointF(width, power_y))
+                self.pins.append(v5_pin)
+                self._add_pin_visual(v5_pin, False)
+                
+                gnd2_pin = Pin("GND", "gnd", QPointF(width, power_y + pin_spacing))
+                self.pins.append(gnd2_pin)
+                self._add_pin_visual(gnd2_pin, False)
+            
+            # Analog pins at bottom
+            analog_start_x = 15
+            for i in range(6):
+                pin_x = analog_start_x + i * 13
+                if pin_x < width - 15:
+                    a_pin = Pin(f"A{i}", "analog", QPointF(pin_x, height))
+                    self.pins.append(a_pin)
+                    self._add_pin_visual(a_pin, False, True)  # Show at bottom
+                    
+        elif self.component_type == "LED":
+            # LED: Anode (+) and Cathode (-)
             self.pins = [
-                QPointF(0, height * 0.25),      # Left top
-                QPointF(0, height * 0.75),      # Left bottom
-                QPointF(width, height * 0.25),  # Right top
-                QPointF(width, height * 0.75),  # Right bottom
+                Pin("Anode", "digital", QPointF(0, height / 2)),
+                Pin("Cathode", "gnd", QPointF(width, height / 2))
             ]
-        elif self.component_type in ["LED", "Resistor"]:
-            # 2-pin components
+            for pin in self.pins:
+                self._add_pin_visual(pin, pin.position.x() == 0)
+            self.state = {"on": False, "brightness": 0}
+            
+        elif self.component_type == "Resistor":
+            # Resistor: Two terminals
             self.pins = [
-                QPointF(0, height / 2),      # Left
-                QPointF(width, height / 2),  # Right
+                Pin("T1", "digital", QPointF(0, height / 2)),
+                Pin("T2", "digital", QPointF(width, height / 2))
             ]
+            for pin in self.pins:
+                self._add_pin_visual(pin, pin.position.x() == 0)
+            self.properties = {"resistance": 220}  # Default 220Ω
+            
         elif self.component_type == "Button":
-            # 2-pin component
+            # Button: Two terminals
             self.pins = [
-                QPointF(0, height / 2),
-                QPointF(width, height / 2),
+                Pin("Pin1", "digital", QPointF(0, height / 2)),
+                Pin("Pin2", "digital", QPointF(width, height / 2))
             ]
+            for pin in self.pins:
+                self._add_pin_visual(pin, pin.position.x() == 0)
+            self.state = {"pressed": False}
+            
+        elif "Sensor" in self.component_type:
+            # Sensors: VCC, GND, Signal
+            self.pins = [
+                Pin("VCC", "power", QPointF(0, height * 0.3)),
+                Pin("GND", "gnd", QPointF(0, height * 0.7)),
+                Pin("OUT", "analog", QPointF(width, height / 2))
+            ]
+            for pin in self.pins:
+                self._add_pin_visual(pin, pin.position.x() == 0)
+            self.state = {"value": 0}
+            
+        elif "Motor" in self.component_type:
+            # Motors: + and -
+            self.pins = [
+                Pin("+", "power", QPointF(0, height / 2)),
+                Pin("-", "gnd", QPointF(width, height / 2))
+            ]
+            for pin in self.pins:
+                self._add_pin_visual(pin, pin.position.x() == 0)
+            self.state = {"speed": 0}
+            
         else:
-            # Generic 4-pin component
+            # Generic component with basic pins
             self.pins = [
-                QPointF(0, height / 2),          # Left
-                QPointF(width, height / 2),      # Right
-                QPointF(width / 2, 0),           # Top
-                QPointF(width / 2, height),      # Bottom
+                Pin("VCC", "power", QPointF(0, height * 0.3)),
+                Pin("GND", "gnd", QPointF(0, height * 0.7)),
+                Pin("SIG", "digital", QPointF(width, height / 2))
             ]
+            for pin in self.pins:
+                self._add_pin_visual(pin, pin.position.x() == 0)
+    
+    def _add_pin_visual(self, pin: Pin, label_left: bool = True, label_bottom: bool = False):
+        """Add visual indicator for a pin with label"""
+        # Pin circle
+        pin_indicator = QGraphicsEllipseItem(-4, -4, 8, 8, self)
+        pin_indicator.setPos(pin.position)
         
-        # Draw pin indicators
-        for pin_pos in self.pins:
-            pin_indicator = QGraphicsEllipseItem(-3, -3, 6, 6, self)
-            pin_indicator.setPos(pin_pos)
+        # Color code by type
+        if pin.pin_type == "power":
+            pin_indicator.setBrush(QBrush(QColor(255, 0, 0)))
+            pin_indicator.setPen(QPen(QColor(200, 0, 0), 2))
+        elif pin.pin_type == "gnd":
+            pin_indicator.setBrush(QBrush(QColor(50, 50, 50)))
+            pin_indicator.setPen(QPen(QColor(100, 100, 100), 2))
+        elif pin.pin_type == "analog":
+            pin_indicator.setBrush(QBrush(QColor(0, 255, 0)))
+            pin_indicator.setPen(QPen(QColor(0, 200, 0), 2))
+        else:  # digital
             pin_indicator.setBrush(QBrush(QColor(255, 255, 0)))
-            pin_indicator.setPen(QPen(QColor(200, 200, 0), 1))
+            pin_indicator.setPen(QPen(QColor(200, 200, 0), 2))
+        
+        self.pin_graphics.append(pin_indicator)
+        
+        # Pin label
+        label = QGraphicsTextItem(pin.name, self)
+        label.setDefaultTextColor(QColor(200, 255, 255))
+        label.setFont(QFont("Consolas", 7))
+        
+        if label_bottom:
+            label.setPos(pin.position.x() - 8, pin.position.y() + 3)
+        elif label_left:
+            label.setPos(pin.position.x() - 25, pin.position.y() - 8)
+        else:
+            label.setPos(pin.position.x() + 8, pin.position.y() - 8)
+    
+    def get_pin_by_name(self, pin_name: str) -> Optional[Pin]:
+        """Get a pin by its name"""
+        for pin in self.pins:
+            if pin.name == pin_name:
+                return pin
+        return None
     
     def get_pin_scene_pos(self, pin_index):
         """Get the scene position of a pin"""
         if pin_index < len(self.pins):
-            return self.mapToScene(self.pins[pin_index])
+            return self.mapToScene(self.pins[pin_index].position)
         return self.scenePos()
     
     def get_data(self):
         """Serialize component data"""
+        pin_data = [{"name": p.name, "type": p.pin_type} for p in self.pins]
         return {
             "type": self.component_type,
             "id": self.component_id,
             "x": self.pos().x(),
             "y": self.pos().y(),
-            "properties": self.properties
+            "properties": self.properties,
+            "pins": pin_data
         }
 
 
 class WireItem(QGraphicsLineItem):
-    """Wire connection between components"""
+    """Wire connection between component pins"""
     
-    def __init__(self, start_point, end_point=None):
+    def __init__(self, start_comp=None, start_pin=None, end_comp=None, end_pin=None):
         super().__init__()
-        self.start_point = start_point
-        self.end_point = end_point or start_point
-        self.source_component = None
-        self.target_component = None
+        self.start_component = start_comp
+        self.start_pin_name = start_pin
+        self.end_component = end_comp
+        self.end_pin_name = end_pin
+        self.temp_end_point = None
         
         # Styling
-        self.setPen(QPen(QColor(0, 255, 0), 2))
-        self.setLine(start_point.x(), start_point.y(), 
-                     self.end_point.x(), self.end_point.y())
+        self.setPen(QPen(QColor(0, 255, 0), 3))
+        self.setZValue(-1)  # Draw behind components
         
         # Make selectable
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        
+        self.update_position()
     
-    def update_end_point(self, point):
-        """Update the end point of the wire"""
-        self.end_point = point
-        self.setLine(self.start_point.x(), self.start_point.y(),
-                     point.x(), point.y())
+    def update_position(self):
+        """Update wire position based on component positions"""
+        if self.start_component and self.start_pin_name:
+            start_pin = self.start_component.get_pin_by_name(self.start_pin_name)
+            if start_pin:
+                start_pos = self.start_component.mapToScene(start_pin.position)
+                
+                if self.end_component and self.end_pin_name:
+                    end_pin = self.end_component.get_pin_by_name(self.end_pin_name)
+                    if end_pin:
+                        end_pos = self.end_component.mapToScene(end_pin.position)
+                        self.setLine(start_pos.x(), start_pos.y(), end_pos.x(), end_pos.y())
+                        
+                        # Color code by pin type
+                        if start_pin.pin_type == "power" or end_pin.pin_type == "power":
+                            self.setPen(QPen(QColor(255, 0, 0), 3))
+                        elif start_pin.pin_type == "gnd" or end_pin.pin_type == "gnd":
+                            self.setPen(QPen(QColor(100, 100, 100), 3))
+                        else:
+                            self.setPen(QPen(QColor(0, 255, 0), 3))
+                elif self.temp_end_point:
+                    self.setLine(start_pos.x(), start_pos.y(), 
+                               self.temp_end_point.x(), self.temp_end_point.y())
+    
+    def set_temp_end(self, point):
+        """Set temporary end point while dragging"""
+        self.temp_end_point = point
+        self.update_position()
     
     def get_data(self):
         """Serialize wire data"""
         return {
-            "start_x": self.start_point.x(),
-            "start_y": self.start_point.y(),
-            "end_x": self.end_point.x(),
-            "end_y": self.end_point.y(),
+            "start_component": self.start_component.component_id if self.start_component else None,
+            "start_pin": self.start_pin_name,
+            "end_component": self.end_component.component_id if self.end_component else None,
+            "end_pin": self.end_pin_name,
         }
 
 
@@ -162,7 +339,8 @@ class CADCanvas(QGraphicsView):
         # Drawing mode
         self.drawing_wire = False
         self.current_wire = None
-        self.wire_start_point = None
+        self.wire_start_component = None
+        self.wire_start_pin = None
         
         # Component counter for unique IDs
         self.component_counter = 0
@@ -209,30 +387,56 @@ class CADCanvas(QGraphicsView):
     def start_wire_mode(self):
         """Enable wire drawing mode"""
         self.drawing_wire = True
+        self.current_wire = None
+        self.wire_start_component = None
+        self.wire_start_pin = None
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
     
     def stop_wire_mode(self):
         """Disable wire drawing mode"""
         self.drawing_wire = False
         self.current_wire = None
-        self.wire_start_point = None
+        self.wire_start_component = None
+        self.wire_start_pin = None
         self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
     
+    def _find_pin_at_pos(self, scene_pos):
+        """Find which pin is at the given position"""
+        # Check all components
+        for item in self.graphics_scene.items(scene_pos):
+            if isinstance(item, ComponentItem):
+                # Check all pins of this component
+                for pin in item.pins:
+                    pin_scene_pos = item.mapToScene(pin.position)
+                    distance = ((pin_scene_pos.x() - scene_pos.x())**2 + 
+                               (pin_scene_pos.y() - scene_pos.y())**2)**0.5
+                    if distance < 10:  # Click tolerance
+                        return item, pin
+        return None, None
+    
     def mousePressEvent(self, event):
-        """Handle mouse press for wire drawing"""
+        """Handle mouse press for wire drawing with pin selection"""
         if self.drawing_wire and event.button() == Qt.MouseButton.LeftButton:
             scene_pos = self.mapToScene(event.pos())
+            component, pin = self._find_pin_at_pos(scene_pos)
             
-            if self.current_wire is None:
-                # Start new wire
-                self.wire_start_point = scene_pos
-                self.current_wire = WireItem(scene_pos)
-                self.graphics_scene.addItem(self.current_wire)
-            else:
-                # Finish wire
-                self.current_wire.update_end_point(scene_pos)
-                self.current_wire = None
-                self.wire_start_point = None
+            if component and pin:
+                if self.current_wire is None:
+                    # Start new wire from this pin
+                    self.wire_start_component = component
+                    self.wire_start_pin = pin.name
+                    self.current_wire = WireItem(component, pin.name)
+                    self.graphics_scene.addItem(self.current_wire)
+                else:
+                    # Complete wire to this pin
+                    self.current_wire.end_component = component
+                    self.current_wire.end_pin_name = pin.name
+                    self.current_wire.update_position()
+                    
+                    # Reset for next wire
+                    self.current_wire = None
+                    self.wire_start_component = None
+                    self.wire_start_pin = None
         else:
             super().mousePressEvent(event)
     
@@ -240,7 +444,7 @@ class CADCanvas(QGraphicsView):
         """Handle mouse move for wire preview"""
         if self.drawing_wire and self.current_wire:
             scene_pos = self.mapToScene(event.pos())
-            self.current_wire.update_end_point(scene_pos)
+            self.current_wire.set_temp_end(scene_pos)
         else:
             super().mouseMoveEvent(event)
     
@@ -364,12 +568,16 @@ class ComponentLibrary(QWidget):
 
 
 class CADDesignerWindow(QWidget):
-    """Main CAD Designer window with full interface"""
+    """Main CAD Designer window with code editor and simulator"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Orion CAD Designer - Circuit Design Tool")
-        self.setMinimumSize(1400, 800)
+        self.setWindowTitle("Orion CAD Designer - Arduino Circuit Design & Code Editor")
+        self.setMinimumSize(1600, 900)
+        
+        # Simulator
+        from code_editor import CircuitSimulator, CodeEditorPanel
+        self.simulator = CircuitSimulator()
         
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -378,7 +586,7 @@ class CADDesignerWindow(QWidget):
         # Toolbar
         self._create_toolbar(main_layout)
         
-        # Splitter for library and canvas
+        # Main splitter (3-way: library | canvas | code editor)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         
         # Component library (left)
@@ -387,13 +595,13 @@ class CADDesignerWindow(QWidget):
         self.library.setMaximumWidth(250)
         splitter.addWidget(self.library)
         
-        # Canvas (center/right)
+        # Canvas (center)
         canvas_widget = QWidget()
         canvas_layout = QVBoxLayout(canvas_widget)
         canvas_layout.setContentsMargins(5, 5, 5, 5)
         
         # Canvas title
-        canvas_title = QLabel("🔌 Circuit Design Canvas")
+        canvas_title = QLabel("🔌 Circuit Design Canvas (Real Arduino Pins!)")
         canvas_title.setStyleSheet("""
             QLabel {
                 color: #00FFFF;
@@ -410,7 +618,7 @@ class CADDesignerWindow(QWidget):
         canvas_layout.addWidget(self.canvas)
         
         # Status info
-        self.status_label = QLabel("Ready to design | Select components from library")
+        self.status_label = QLabel("Ready | Drag components, click pins to wire | Color: 🔴=Power 🔵=Digital ⚫=GND 🟢=Analog")
         self.status_label.setStyleSheet("""
             QLabel {
                 color: #87CEEB;
@@ -423,7 +631,16 @@ class CADDesignerWindow(QWidget):
         canvas_layout.addWidget(self.status_label)
         
         splitter.addWidget(canvas_widget)
-        splitter.setStretchFactor(1, 1)
+        
+        # Code Editor (right)
+        self.code_editor = CodeEditorPanel()
+        self.code_editor.code_run.connect(self._run_simulation)
+        self.code_editor.setMinimumWidth(400)
+        splitter.addWidget(self.code_editor)
+        
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(2, 2)
         
         main_layout.addWidget(splitter)
         
@@ -435,6 +652,30 @@ class CADDesignerWindow(QWidget):
                 font-family: 'Consolas', 'Courier New', monospace;
             }
         """)
+    
+    def _run_simulation(self, code):
+        """Run circuit simulation with Arduino code"""
+        # Get all components and wires from canvas
+        components = []
+        wires = []
+        
+        for item in self.canvas.graphics_scene.items():
+            if isinstance(item, ComponentItem):
+                components.append(item)
+            elif isinstance(item, WireItem):
+                wires.append(item)
+        
+        # Load to simulator
+        self.simulator.load_circuit(components, wires)
+        
+        # Execute code
+        try:
+            self.simulator.execute_code(code)
+            self.code_editor.log("✓ Simulation complete!")
+            self.status_label.setText("Simulation running | Check LED states on canvas")
+        except Exception as e:
+            self.code_editor.log(f"⚠ Error: {str(e)}")
+            self.status_label.setText(f"Simulation error: {str(e)}")
     
     def _create_toolbar(self, layout):
         """Create toolbar with tools"""

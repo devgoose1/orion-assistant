@@ -864,7 +864,7 @@ class OrionMainWindow(QMainWindow):
         # CAD Circuit Designer button
         self.cad_button = QPushButton("🔌")
         self.cad_button.setFixedSize(45, 45)
-        self.cad_button.setToolTip("Open CAD Circuit Designer (Right-click for options)")
+        self.cad_button.setToolTip("Open CAD Circuit Designer with Code Editor\n• Real Arduino pins (D0-D13, A0-A5)\n• Code editor with syntax highlighting\n• Circuit simulator - test your designs!")
         self.cad_button.clicked.connect(lambda: self.open_cad_designer("custom"))
         self.cad_button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.cad_button.customContextMenuRequested.connect(self.show_cad_menu)
@@ -1604,20 +1604,32 @@ class OrionMainWindow(QMainWindow):
             self.tool_activity_title.setText("⬡ 🔌 CUSTOM CAD DESIGNER ⬡")
             self.tool_activity_display.setHtml("""
                 <div style='color: #FFBF00;'>
-                <p><b>🔌 ORION CAD DESIGNER</b></p>
-                <p style='color: #90EE90;'>Custom circuit design tool opened!</p>
+                <p><b>🔌 ORION CAD DESIGNER v2.0</b></p>
+                <p style='color: #90EE90;'>Full Arduino development environment!</p>
                 <hr style='border: 1px solid rgba(255, 191, 0, 50); margin: 10px 0;'>
-                <p style='color: #87CEEB; font-size: 10px;'><b>💡 Features:</b></p>
+                <p style='color: #87CEEB; font-size: 10px;'><b>💡 New Features:</b></p>
                 <ul style='font-size: 10px; color: #B0E0E6; margin: 5px 0; padding-left: 20px;'>
-                    <li>Drag & drop components</li>
-                    <li>Draw wire connections</li>
-                    <li>Arduino component library</li>
-                    <li>Save/Load designs (JSON)</li>
-                    <li>Export as image</li>
-                    <li>AI assistant integration</li>
+                    <li><b>Real Arduino pins!</b> D0-D13, A0-A5, GND, 5V</li>
+                    <li><b>Code Editor</b> with syntax highlighting</li>
+                    <li><b>Circuit Simulator</b> - test your code!</li>
+                    <li><b>Pin-based wiring</b> - click pins to connect</li>
+                    <li>Color-coded wires (🔴Power 🟢Digital ⚫GND)</li>
+                    <li>Visual LED feedback when running code</li>
+                    <li>Save/Load designs + Export images</li>
                 </ul>
-                <p style='color: #FFA500; font-size: 9px; margin-top: 8px;'>
-                Ask me: "What components do I need for [project]?"
+                <hr style='border: 1px solid rgba(255, 191, 0, 30); margin: 8px 0;'>
+                <p style='color: #FFD700; font-size: 10px;'><b>🎯 How to use:</b></p>
+                <p style='color: #B0E0E6; font-size: 9px; margin: 3px 0;'>
+                1. Add Arduino Uno from library<br>
+                2. Add LED component<br>
+                3. Click "Draw Wire" button<br>
+                4. Click Arduino D13 pin → LED Anode pin<br>
+                5. Write Arduino code in editor<br>
+                6. Click "▶ Run Code" to simulate!
+                </p>
+                <hr style='border: 1px solid rgba(255, 191, 0, 30); margin: 8px 0;'>
+                <p style='color: #FFA500; font-size: 9px; margin-top: 5px;'>
+                💬 Ask me: "How do I connect an LED to Arduino?"
                 </p>
                 </div>
             """)
