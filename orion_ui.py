@@ -18,7 +18,7 @@ from html import escape
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QLineEdit, QLabel, QPushButton, QFrame, QGraphicsDropShadowEffect,
-    QSizePolicy
+    QSizePolicy, QTabWidget
 )
 from PySide6.QtCore import Qt, QTimer, Signal, Slot, QThread, QPropertyAnimation, QEasingCurve, Property, QUrl
 from PySide6.QtGui import (QPainter, QColor, QPen, QFont, QLinearGradient, QPalette, QBrush, QImage,
@@ -540,7 +540,7 @@ class OrionMainWindow(QMainWindow):
         self.tts_worker = None
 
         # Browser widget reference
-        self.browser = None
+        self.browser_tabs = None  # QTabWidget container
         self.browser_placeholder = None
         self.browser_base_width = 900
 
@@ -740,7 +740,7 @@ class OrionMainWindow(QMainWindow):
 
     def _ensure_embedded_browser(self):
         """Try to enable the embedded browser if possible."""
-        if WEBENGINE_AVAILABLE and self.browser:
+        if WEBENGINE_AVAILABLE and self.browser_tabs:
             return True
         if not self._try_enable_webengine():
             self._show_browser_placeholder()
@@ -766,38 +766,55 @@ class OrionMainWindow(QMainWindow):
             return False
 
     def _init_embedded_browser(self):
-        """Create and mount the embedded browser widget."""
-        if not WEBENGINE_AVAILABLE or QWebEngineView is None or self.browser:
+        """Create and mount the embedded browser widget with tabs."""
+        if not WEBENGINE_AVAILABLE or QWebEngineView is None or self.browser_tabs:
             return False
 
         if hasattr(self, "browser_placeholder") and self.browser_placeholder is not None:
             self.browser_placeholder.setParent(None)
             self.browser_placeholder = None
 
-        self.browser = QWebEngineView()
-        self.browser.setStyleSheet("""
-            QWebEngineView {
+        # Create tab widget for browser
+        self.browser_tabs = QTabWidget()
+        self.browser_tabs.setTabsClosable(True)
+        self.browser_tabs.setMovable(True)
+        self.browser_tabs.tabCloseRequested.connect(self._close_browser_tab)
+        self.browser_tabs.setStyleSheet("""
+            QTabWidget::pane {
                 background-color: rgba(0, 0, 0, 100);
                 border: 2px solid rgba(0, 191, 255, 80);
                 border-radius: 8px;
             }
+            QTabBar::tab {
+                background-color: rgba(0, 50, 100, 120);
+                border: 1px solid rgba(0, 191, 255, 60);
+                border-radius: 4px;
+                padding: 6px 12px;
+                margin: 2px;
+                color: #00BFFF;
+            }
+            QTabBar::tab:selected {
+                background-color: rgba(0, 100, 150, 180);
+                border: 1px solid rgba(0, 191, 255, 120);
+                color: #00FFFF;
+            }
+            QTabBar::tab:hover {
+                background-color: rgba(0, 80, 130, 150);
+            }
         """)
-        self.browser_container_layout.addWidget(self.browser)
+        self.browser_container_layout.addWidget(self.browser_tabs)
         self._ensure_browser_controls()
-        self._set_browser_home()
-        self._update_browser_zoom()
+        
+        # Add initial home tab
+        self._add_browser_tab()
         return True
 
     def _ensure_browser_controls(self):
         """Create the browser control buttons when WebEngine is available."""
-        if self.browser_controls_container.isVisible() or not self.browser:
+        if self.browser_controls_container.isVisible() or not self.browser_tabs:
             return
 
-        back_btn = QPushButton("◄")
-        back_btn.setFixedWidth(40)
-        back_btn.setToolTip("Back")
-        back_btn.clicked.connect(self.browser.back)
-        back_btn.setStyleSheet("""
+        btn_style = """
             QPushButton {
                 background-color: rgba(0, 100, 150, 120);
                 border: 1px solid rgba(0, 191, 255, 100);
@@ -807,38 +824,134 @@ class OrionMainWindow(QMainWindow):
                 padding: 5px;
             }
             QPushButton:hover { background-color: rgba(0, 150, 200, 150); }
-        """)
+        """
+
+        back_btn = QPushButton("◄")
+        back_btn.setFixedWidth(40)
+        back_btn.setToolTip("Back")
+        back_btn.clicked.connect(self._browser_back)
+        back_btn.setStyleSheet(btn_style)
 
         forward_btn = QPushButton("►")
         forward_btn.setFixedWidth(40)
         forward_btn.setToolTip("Forward")
-        forward_btn.clicked.connect(self.browser.forward)
-        forward_btn.setStyleSheet(back_btn.styleSheet())
+        forward_btn.clicked.connect(self._browser_forward)
+        forward_btn.setStyleSheet(btn_style)
 
         refresh_btn = QPushButton("⟳")
         refresh_btn.setFixedWidth(40)
         refresh_btn.setToolTip("Refresh")
-        refresh_btn.clicked.connect(self.browser.reload)
-        refresh_btn.setStyleSheet(back_btn.styleSheet())
+        refresh_btn.clicked.connect(self._browser_reload)
+        refresh_btn.setStyleSheet(btn_style)
 
         home_btn = QPushButton("⌂")
         home_btn.setFixedWidth(40)
         home_btn.setToolTip("Home")
         home_btn.clicked.connect(self.load_browser_home)
-        home_btn.setStyleSheet(back_btn.styleSheet())
+        home_btn.setStyleSheet(btn_style)
+
+        new_tab_btn = QPushButton("+")
+        new_tab_btn.setFixedWidth(40)
+        new_tab_btn.setToolTip("New Tab")
+        new_tab_btn.clicked.connect(lambda: self._add_browser_tab())
+        new_tab_btn.setStyleSheet(btn_style)
 
         self.browser_controls_layout.addWidget(back_btn)
         self.browser_controls_layout.addWidget(forward_btn)
         self.browser_controls_layout.addWidget(refresh_btn)
         self.browser_controls_layout.addWidget(home_btn)
+        self.browser_controls_layout.addWidget(new_tab_btn)
         self.browser_controls_layout.addStretch()
         self.browser_controls_container.setVisible(True)
 
-    def _set_browser_home(self):
-        """Set the embedded browser home page."""
-        if not self.browser:
+    def _add_browser_tab(self, url=None, title="New Tab"):
+        """Add a new browser tab."""
+        if not self.browser_tabs:
+            return None
+        
+        if not WEBENGINE_AVAILABLE or QWebEngineView is None:
+            return None
+        
+        browser = QWebEngineView()
+        browser.setStyleSheet("""
+            QWebEngineView {
+                background-color: rgba(0, 0, 0, 100);
+                border: none;
+            }
+        """)
+        
+        # Connect title change signal
+        browser.titleChanged.connect(lambda t: self._update_tab_title(browser, t))
+        
+        # Add tab
+        index = self.browser_tabs.addTab(browser, title)
+        self.browser_tabs.setCurrentIndex(index)
+        
+        # Load URL or home page
+        if url:
+            browser.setUrl(QUrl(url))
+        else:
+            self._set_browser_home_for_view(browser)
+        
+        self._update_browser_zoom()
+        return browser
+    
+    def _close_browser_tab(self, index):
+        """Close a browser tab."""
+        if not self.browser_tabs or self.browser_tabs.count() <= 1:
+            # Keep at least one tab
             return
-        self.browser.setHtml("""
+        widget = self.browser_tabs.widget(index)
+        self.browser_tabs.removeTab(index)
+        if widget:
+            widget.deleteLater()
+    
+    def _get_current_browser(self):
+        """Get the current active browser view."""
+        if not self.browser_tabs:
+            return None
+        return self.browser_tabs.currentWidget()
+    
+    def _update_tab_title(self, browser, title):
+        """Update tab title when page title changes."""
+        if not self.browser_tabs:
+            return
+        for i in range(self.browser_tabs.count()):
+            if self.browser_tabs.widget(i) == browser:
+                # Limit title length
+                display_title = title[:25] + "..." if len(title) > 25 else title
+                self.browser_tabs.setTabText(i, display_title or "New Tab")
+                break
+    
+    def _browser_back(self):
+        """Navigate back in current tab."""
+        browser = self._get_current_browser()
+        if browser and QWebEngineView is not None and isinstance(browser, QWebEngineView):
+            browser.back()
+    
+    def _browser_forward(self):
+        """Navigate forward in current tab."""
+        browser = self._get_current_browser()
+        if browser and QWebEngineView is not None and isinstance(browser, QWebEngineView):
+            browser.forward()
+    
+    def _browser_reload(self):
+        """Reload current tab."""
+        browser = self._get_current_browser()
+        if browser and QWebEngineView is not None and isinstance(browser, QWebEngineView):
+            browser.reload()
+
+    def _set_browser_home(self):
+        """Set the current browser tab to home page."""
+        browser = self._get_current_browser()
+        if browser and hasattr(browser, 'setHtml'):
+            self._set_browser_home_for_view(browser)
+    
+    def _set_browser_home_for_view(self, browser):
+        """Set the embedded browser home page for a specific view."""
+        if not browser:
+            return
+        browser.setHtml("""
             <html>
             <head>
                 <style>
@@ -893,12 +1006,16 @@ class OrionMainWindow(QMainWindow):
 
     def _update_browser_zoom(self):
         """Scale the web content to better fit the panel width."""
-        if not self.browser:
+        if not self.browser_tabs:
             return
-        width = max(self.browser.width(), 1)
-        zoom = width / float(self.browser_base_width)
-        zoom = max(0.6, min(1.2, zoom))
-        self.browser.setZoomFactor(zoom)
+        # Apply zoom to all tabs
+        for i in range(self.browser_tabs.count()):
+            browser = self.browser_tabs.widget(i)
+            if browser and QWebEngineView is not None and isinstance(browser, QWebEngineView):
+                width = max(browser.width(), 1)
+                zoom = width / float(self.browser_base_width)
+                zoom = max(0.6, min(1.2, zoom))
+                browser.setZoomFactor(zoom)
 
     def resizeEvent(self, event):
         """Keep browser content scaled with the window size."""
@@ -907,9 +1024,9 @@ class OrionMainWindow(QMainWindow):
 
     def _show_browser_placeholder(self):
         """Show a placeholder when WebEngine is not available."""
-        if hasattr(self, "browser") and self.browser:
-            self.browser.setParent(None)
-            self.browser = None
+        if hasattr(self, "browser_tabs") and self.browser_tabs:
+            self.browser_tabs.setParent(None)
+            self.browser_tabs = None
 
         if not hasattr(self, "browser_placeholder") or self.browser_placeholder is None:
             self.browser_placeholder = QLabel()
@@ -1300,11 +1417,11 @@ class OrionMainWindow(QMainWindow):
             
             print(f">>> [DEBUG] Opening URL: {url}")
             
-            # Use integrated browser if available
-            if self._ensure_embedded_browser() and self.browser:
-                self.browser.setUrl(QUrl(url))
-                print(f">>> [DEBUG] URL loaded in integrated browser: {url}")
-                return {"status": "success", "message": f"Opened '{url}' in integrated browser."}
+            # Use integrated browser if available - open in new tab
+            if self._ensure_embedded_browser() and self.browser_tabs:
+                self._add_browser_tab(url, url)
+                print(f">>> [DEBUG] URL loaded in new browser tab: {url}")
+                return {"status": "success", "message": f"Opened '{url}' in new tab."}
 
             print(">>> [ERROR] Integrated browser not available. QtWebEngine import failed.")
             detail = f"Python: {sys.executable}. Import error: {WEBENGINE_IMPORT_ERROR}" if WEBENGINE_IMPORT_ERROR else f"Python: {sys.executable}"
