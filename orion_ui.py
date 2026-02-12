@@ -45,6 +45,9 @@ print(f">>> [DEBUG] WEBENGINE_AVAILABLE: {WEBENGINE_AVAILABLE}")
 # Import backend logic
 from main import ConversationMemory
 
+# Import CAD Designer
+from cad_designer import CADDesignerWindow
+
 # Try to import TTS
 try:
     import websockets
@@ -336,6 +339,14 @@ Available tools:
 - open_application(application_name): Open desktop application (notepad, calculator, chrome, etc)
 - open_website(url): Open URL in browser
 - execute_code(code): Execute Python code and return result
+- design_circuit(platform): Open CAD software for Arduino circuit design. Platforms: "custom" (built-in Orion CAD), "tinkercad" (web-based, beginner-friendly), "easyeda" (web-based, advanced), "kicad" (desktop, professional), "fritzing" (desktop, Arduino-focused)
+
+When user asks about Arduino, circuits, components, or electronics:
+- Provide helpful component information (pin connections, specifications, typical usage)
+- Suggest circuit designs and component combinations
+- Explain how to wire components safely
+- Generate Arduino code examples when requested
+- Recommend which CAD platform to use based on skill level
 
 CRITICAL RULE: When a user asks you to DO something (create, open, list, execute, etc), you MUST respond with ONLY JSON. NO explanatory text before or after.
 
@@ -363,6 +374,15 @@ Assistant: {"tool": "execute_code", "args": {"code": "5+5"}}
 
 User: "read the file main.py"
 Assistant: {"tool": "read_file", "args": {"file_path": "main.py"}}
+
+User: "design arduino circuit" or "open circuit designer" or "I want to design a circuit"
+Assistant: {"tool": "design_circuit", "args": {"platform": "custom"}}
+
+User: "open tinkercad" or "use tinkercad"
+Assistant: {"tool": "design_circuit", "args": {"platform": "tinkercad"}}
+
+User: "open kicad" or "use kicad"
+Assistant: {"tool": "design_circuit", "args": {"platform": "kicad"}}
 
 EXAMPLES OF NORMAL CHAT (NO JSON):
 User: "hello" or "hi"
@@ -705,6 +725,9 @@ class OrionMainWindow(QMainWindow):
         self.stt_language = "auto"  # "auto", "nl", "en"
         self.stt_microphone_index = None  # None = default microphone
 
+        # CAD Designer window
+        self.cad_window = None
+
         # Browser widget reference
         self.browser_tabs = None  # QTabWidget container
         self.browser_placeholder = None
@@ -838,7 +861,32 @@ class OrionMainWindow(QMainWindow):
             self.mic_button.setEnabled(False)
             self.mic_button.setToolTip("STT not available - install required libraries")
         
+        # CAD Circuit Designer button
+        self.cad_button = QPushButton("🔌")
+        self.cad_button.setFixedSize(45, 45)
+        self.cad_button.setToolTip("Open CAD Circuit Designer (Right-click for options)")
+        self.cad_button.clicked.connect(lambda: self.open_cad_designer("custom"))
+        self.cad_button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.cad_button.customContextMenuRequested.connect(self.show_cad_menu)
+        self.cad_button.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(150, 100, 0, 120);
+                border: 2px solid rgba(255, 191, 0, 100);
+                border-radius: 22px;
+                color: #FFBF00;
+                font-size: 20px;
+            }
+            QPushButton:hover {
+                background-color: rgba(200, 150, 0, 150);
+                border: 2px solid rgba(255, 215, 0, 150);
+            }
+            QPushButton:pressed {
+                background-color: rgba(255, 200, 0, 180);
+            }
+        """)
+        
         input_layout.addWidget(self.input_field)
+        input_layout.addWidget(self.cad_button)
         input_layout.addWidget(self.mic_button)
         middle_layout.addWidget(input_container)
         
@@ -1461,6 +1509,154 @@ class OrionMainWindow(QMainWindow):
         lang_names = {"auto": "Auto-detect", "nl": "Dutch", "en": "English"}
         self.append_chat_message("SYSTEM", f"Language set to: {lang_names.get(language, language)}", "#00BFFF")
     
+    def show_cad_menu(self, position):
+        """Show CAD platform selection menu on right-click"""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QAction
+        
+        menu = QMenu()
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: rgba(47, 35, 10, 230);
+                border: 2px solid rgba(255, 191, 0, 150);
+                border-radius: 8px;
+                padding: 5px;
+                color: #FFBF00;
+            }
+            QMenu::item {
+                padding: 8px 20px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: rgba(200, 150, 0, 150);
+            }
+        """)
+        
+        # Add header
+        header_action = QAction("⚡ Circuit Design Platforms", self)
+        header_action.setEnabled(False)
+        menu.addAction(header_action)
+        menu.addSeparator()
+        
+        # Built-in CAD (Primary option)
+        builtin_header = QAction("⭐ Built-in Designer (Recommended)", self)
+        builtin_header.setEnabled(False)
+        menu.addAction(builtin_header)
+        
+        custom_action = QAction("   🔌 Orion CAD Designer", self)
+        custom_action.triggered.connect(lambda: self.open_cad_designer("custom"))
+        menu.addAction(custom_action)
+        
+        menu.addSeparator()
+        
+        # Web-based platforms
+        web_header = QAction("🌐 Web-Based Alternatives", self)
+        web_header.setEnabled(False)
+        menu.addAction(web_header)
+        
+        tinkercad_action = QAction("   TinkerCAD Circuits (Beginner)", self)
+        tinkercad_action.triggered.connect(lambda: self.open_cad_designer("tinkercad"))
+        menu.addAction(tinkercad_action)
+        
+        easyeda_action = QAction("   EasyEDA (Advanced PCB)", self)
+        easyeda_action.triggered.connect(lambda: self.open_cad_designer("easyeda"))
+        menu.addAction(easyeda_action)
+        
+        circuitverse_action = QAction("   CircuitVerse (Digital)", self)
+        circuitverse_action.triggered.connect(lambda: self.open_cad_designer("circuitverse"))
+        menu.addAction(circuitverse_action)
+        
+        falstad_action = QAction("   Falstad (Analog Simulator)", self)
+        falstad_action.triggered.connect(lambda: self.open_cad_designer("falstad"))
+        menu.addAction(falstad_action)
+        
+        menu.addSeparator()
+        
+        # Desktop applications
+        desktop_header = QAction("💻 Desktop Applications", self)
+        desktop_header.setEnabled(False)
+        menu.addAction(desktop_header)
+        
+        kicad_action = QAction("   KiCAD (Professional)", self)
+        kicad_action.triggered.connect(lambda: self.open_cad_designer("kicad"))
+        menu.addAction(kicad_action)
+        
+        fritzing_action = QAction("   Fritzing (Arduino-focused)", self)
+        fritzing_action.triggered.connect(lambda: self.open_cad_designer("fritzing"))
+        menu.addAction(fritzing_action)
+        
+        menu.exec(self.cad_button.mapToGlobal(position))
+    
+    def open_cad_designer(self, platform="custom"):
+        """Open a CAD circuit designer platform"""
+        # Check if custom CAD platform
+        if platform == "custom":
+            if self.cad_window is None or not self.cad_window.isVisible():
+                self.cad_window = CADDesignerWindow(self)
+                self.cad_window.show()
+            else:
+                self.cad_window.activateWindow()
+                self.cad_window.raise_()
+            
+            self.append_chat_message("SYSTEM", "Orion CAD Designer opened! Design your Arduino circuits here.", "#90EE90")
+            
+            # Update tool activity display
+            self.tool_activity_title.setText("⬡ 🔌 CUSTOM CAD DESIGNER ⬡")
+            self.tool_activity_display.setHtml("""
+                <div style='color: #FFBF00;'>
+                <p><b>🔌 ORION CAD DESIGNER</b></p>
+                <p style='color: #90EE90;'>Custom circuit design tool opened!</p>
+                <hr style='border: 1px solid rgba(255, 191, 0, 50); margin: 10px 0;'>
+                <p style='color: #87CEEB; font-size: 10px;'><b>💡 Features:</b></p>
+                <ul style='font-size: 10px; color: #B0E0E6; margin: 5px 0; padding-left: 20px;'>
+                    <li>Drag & drop components</li>
+                    <li>Draw wire connections</li>
+                    <li>Arduino component library</li>
+                    <li>Save/Load designs (JSON)</li>
+                    <li>Export as image</li>
+                    <li>AI assistant integration</li>
+                </ul>
+                <p style='color: #FFA500; font-size: 9px; margin-top: 8px;'>
+                Ask me: "What components do I need for [project]?"
+                </p>
+                </div>
+            """)
+            return
+        
+        # Otherwise use web/desktop platforms
+        self.append_chat_message("SYSTEM", f"Opening {platform.upper()} circuit designer...", "#FFBF00")
+        
+        # Use the _design_circuit tool function
+        result = self._design_circuit(platform)
+        
+        if result.get("status") == "success":
+            self.append_chat_message("SYSTEM", result.get("message", "CAD platform opened."), "#90EE90")
+            
+            # Update tool activity display
+            self.tool_activity_title.setText("⬡ 🔌 CAD DESIGNER OPENED ⬡")
+            self.tool_activity_display.setHtml(f"""
+                <div style='color: #FFBF00;'>
+                <p><b>🔌 CIRCUIT DESIGN MODE</b></p>
+                <p>Platform: {escape(platform.upper())}</p>
+                <p style='color: #90EE90;'>{escape(result.get("message", ""))}</p>
+                <hr style='border: 1px solid rgba(255, 191, 0, 50); margin: 10px 0;'>
+                <p style='color: #87CEEB; font-size: 10px;'><b>💡 Arduino Components:</b></p>
+                <ul style='font-size: 10px; color: #B0E0E6; margin: 5px 0; padding-left: 20px;'>
+                    <li>Arduino Uno/Nano/Mega</li>
+                    <li>LEDs, Resistors, Capacitors</li>
+                    <li>Sensors: Temperature, Motion, Light</li>
+                    <li>Motors: Servo, DC, Stepper</li>
+                    <li>Displays: LCD, OLED, 7-segment</li>
+                    <li>Buttons, Potentiometers, Switches</li>
+                </ul>
+                <p style='color: #FFA500; font-size: 9px; margin-top: 8px;'>
+                Ask me for help with components, wiring, or Arduino code!
+                </p>
+                </div>
+            """)
+        else:
+            self.append_chat_message("ERROR", result.get("message", "Failed to open CAD platform."), "#FF6B6B")
+    
     def append_chat_message(self, sender, message, color="#B0E0E6"):
         """Helper method to append a message to chat display"""
         self.chat_display.append(f"""
@@ -1617,6 +1813,15 @@ class OrionMainWindow(QMainWindow):
                     """
                 else:
                     result_html = f"<p style='color: #FF6B6B;'>{escape(result.get('message', ''))}</p>"
+            
+            elif tool_name == "design_circuit":
+                result = self._design_circuit(args.get("platform", "tinkercad"))
+                result_html = f"""
+                    <p style='color: #00FFFF;'><b>🔌 DESIGN CIRCUIT</b></p>
+                    <p style='color: #87CEEB;'>Platform: {escape(args.get("platform", "tinkercad").upper())}</p>
+                    <p style='color: #90EE90;'>Status: {result.get("status")}</p>
+                    <p>{escape(result.get("message", ""))}</p>
+                """
             
             # Update tool activity display
             self.tool_activity_display.setHtml(result_html)
@@ -1838,6 +2043,103 @@ class OrionMainWindow(QMainWindow):
                 
         except Exception as e:
             return {"status": "error", "message": f"Execution error: {str(e)}"}
+    
+    def _design_circuit(self, platform="tinkercad"):
+        """Open CAD software for Arduino circuit design"""
+        try:
+            if not platform or not isinstance(platform, str):
+                platform = "custom"
+            
+            platform = platform.lower().strip()
+            print(f">>> [DEBUG] Opening CAD platform: '{platform}'")
+            
+            # Custom built-in CAD
+            if platform == "custom":
+                if self.cad_window is None or not self.cad_window.isVisible():
+                    self.cad_window = CADDesignerWindow(self)
+                    self.cad_window.show()
+                else:
+                    self.cad_window.activateWindow()
+                    self.cad_window.raise_()
+                
+                return {
+                    "status": "success",
+                    "message": "Orion CAD Designer opened - your custom circuit design tool with drag & drop components!"
+                }
+            
+            # Web-based platforms
+            web_platforms = {
+                "tinkercad": {
+                    "url": "https://www.tinkercad.com/circuits",
+                    "name": "TinkerCAD Circuits",
+                    "description": "Beginner-friendly Arduino circuit simulator"
+                },
+                "easyeda": {
+                    "url": "https://easyeda.com/editor",
+                    "name": "EasyEDA",
+                    "description": "Advanced web-based PCB design tool"
+                },
+                "circuitverse": {
+                    "url": "https://circuitverse.org/simulator",
+                    "name": "CircuitVerse",
+                    "description": "Digital circuit simulator"
+                },
+                "falstad": {
+                    "url": "https://www.falstad.com/circuit/",
+                    "name": "Falstad Circuit Simulator",
+                    "description": "Electronic circuit simulator"
+                }
+            }
+            
+            # Desktop applications
+            desktop_apps = {
+                "kicad": {"app": "kicad", "name": "KiCAD"},
+                "fritzing": {"app": "Fritzing", "name": "Fritzing"},
+            }
+            
+            # Check if web-based platform
+            if platform in web_platforms:
+                platform_info = web_platforms[platform]
+                url = platform_info["url"]
+                
+                # Use integrated browser if available
+                if self._ensure_embedded_browser() and self.browser_tabs:
+                    self._add_browser_tab(url, f"CAD: {platform_info['name']}")
+                    return {
+                        "status": "success",
+                        "message": f"Opened {platform_info['name']} in new tab. {platform_info['description']}."
+                    }
+                else:
+                    return {
+                        "status": "error",
+                        "message": "Integrated browser not available. Install PySide6-WebEngine."
+                    }
+            
+            # Check if desktop application
+            elif platform in desktop_apps:
+                app_info = desktop_apps[platform]
+                result = self._open_application(app_info["app"])
+                if result.get("status") == "success":
+                    return {
+                        "status": "success",
+                        "message": f"Launched {app_info['name']} desktop application."
+                    }
+                else:
+                    return {
+                        "status": "error",
+                        "message": f"{app_info['name']} not found. Please install it first (https://www.kicad.org/ or https://fritzing.org/)."
+                    }
+            
+            # Default to TinkerCAD if unknown platform
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Unknown platform '{platform}'. Available: tinkercad, easyeda, kicad, fritzing, circuitverse, falstad."
+                }
+                
+        except Exception as e:
+            print(f">>> [ERROR] Failed to open CAD platform: {e}")
+            return {"status": "error", "message": f"Error: {str(e)}"}
         
     @Slot(str)
     def handle_response(self, response):
