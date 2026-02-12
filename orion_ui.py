@@ -10,6 +10,7 @@ import math
 import subprocess
 import webbrowser
 import asyncio
+import tempfile
 from typing import Optional
 from datetime import datetime
 from dotenv import load_dotenv
@@ -51,6 +52,17 @@ try:
 except ImportError:
     TTS_AVAILABLE = False
     print("WARNING: websockets not available. TTS disabled. Install with: pip install websockets")
+
+# Try to import STT
+try:
+    import speech_recognition as sr
+    from faster_whisper import WhisperModel
+    STT_AVAILABLE = True
+except ImportError:
+    STT_AVAILABLE = False
+    sr = None
+    WhisperModel = None
+    print("WARNING: STT libraries not available. Install with: pip install SpeechRecognition pyaudio faster-whisper")
 
 load_dotenv()
 
@@ -511,6 +523,156 @@ class TTSWorker(QThread):
             print(f"TTS Error: {e}")
 
 
+class STTWorker(QThread):
+    """Background thread for Speech-to-Text using faster-whisper"""
+    transcription_ready = Signal(str)
+    error_occurred = Signal(str)
+    recording_started = Signal()
+    recording_stopped = Signal()
+    
+    def __init__(self, language="auto", microphone_index=None):
+        super().__init__()
+        self.language = language  # "auto", "nl", "en", etc.
+        self.microphone_index = microphone_index
+        self.recognizer = None
+        self.microphone = None
+        
+    def run(self):
+        if not STT_AVAILABLE or sr is None:
+            self.error_occurred.emit("STT not available. Install required libraries.")
+            return
+            
+        try:
+            # List available microphones
+            print(">>> [STT DEBUG] Available microphones:")
+            for index, name in enumerate(sr.Microphone.list_microphone_names()):
+                print(f"    [{index}] {name}")
+            
+            # Initialize recognizer and microphone
+            self.recognizer = sr.Recognizer()
+            if self.microphone_index is not None:
+                self.microphone = sr.Microphone(device_index=self.microphone_index)
+                print(f">>> [STT DEBUG] Using microphone [{self.microphone_index}]: {sr.Microphone.list_microphone_names()[self.microphone_index]}")
+            else:
+                self.microphone = sr.Microphone()
+                print(f">>> [STT DEBUG] Using default microphone")
+            
+            # Configure for EXTREMELY bad/quiet microphones
+            self.recognizer.dynamic_energy_threshold = False  # Don't auto-adjust
+            self.recognizer.energy_threshold = 10  # EXTREMELY low threshold (3% mic needs this)
+            self.recognizer.pause_threshold = 0.5  # Shorter pause before stopping
+            
+            self.recording_started.emit()
+            
+            # Capture audio
+            with self.microphone as source:
+                # Skip noise calibration for extremely weak mics - just set ultra-low threshold
+                print(f">>> [STT DEBUG] Microphone configured with MAXIMUM sensitivity")
+                print(f">>> [STT DEBUG] Energy threshold: {self.recognizer.energy_threshold} (ultra-sensitive)")
+                print(f">>> [STT DEBUG] Now listening... PUT YOUR MOUTH CLOSE TO THE MIC AND SPEAK LOUDLY!")
+                print(f">>> [STT DEBUG] (Will auto-detect when you start speaking)")
+                
+                # Extended listening time - will start recording when sound detected
+                audio = self.recognizer.listen(source, timeout=30, phrase_time_limit=25)
+                print(f">>> [STT DEBUG] Audio captured! Duration: {len(audio.frame_data) / (audio.sample_rate * audio.sample_width):.2f} seconds")
+            
+            self.recording_stopped.emit()
+            
+            # Transcribe using faster-whisper
+            self._transcribe_audio(audio)
+            
+        except sr.WaitTimeoutError:
+            self.recording_stopped.emit()
+            self.error_occurred.emit("No speech detected (timeout)")
+        except Exception as e:
+            self.recording_stopped.emit()
+            self.error_occurred.emit(f"STT Error: {str(e)}")
+    
+    def _transcribe_audio(self, audio):
+        """Transcribe audio using faster-whisper or fallback to Google"""
+        try:
+            print(f">>> [STT DEBUG] Starting transcription...")
+            
+            if WhisperModel is None:
+                raise ImportError("faster-whisper not available")
+                
+            # Save audio to temporary file
+            audio_data = audio.get_wav_data()
+            print(f">>> [STT DEBUG] Audio data size: {len(audio_data)} bytes")
+            
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
+                temp_audio.write(audio_data)
+                temp_path = temp_audio.name
+            
+            print(f">>> [STT DEBUG] Audio saved to: {temp_path}")
+            print(f">>> [STT DEBUG] Loading Whisper 'tiny' model (fast, lower accuracy)...")
+            
+            # Use 'tiny' model for faster processing (small was too heavy)
+            model = WhisperModel("tiny", device="cpu", compute_type="int8")
+            
+            print(f">>> [STT DEBUG] Model loaded, transcribing...")
+            
+            # Transcribe with language support and VAD filter for noise reduction
+            if self.language == "auto":
+                segments, info = model.transcribe(
+                    temp_path, 
+                    beam_size=5,
+                    vad_filter=True,  # Voice Activity Detection to filter out noise
+                    vad_parameters=dict(min_silence_duration_ms=500)  # Reduce false positives
+                )
+            else:
+                segments, info = model.transcribe(
+                    temp_path, 
+                    beam_size=5, 
+                    language=self.language,
+                    vad_filter=True,
+                    vad_parameters=dict(min_silence_duration_ms=500)
+                )
+            
+            print(f">>> [STT DEBUG] Transcription complete, processing segments...")
+            
+            # Combine segments
+            transcription = " ".join([segment.text for segment in segments])
+            print(f">>> [STT DEBUG] Transcription result: '{transcription}'")
+            
+            # Clean up temp file
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+            
+            if transcription.strip():
+                print(f">>> [STT DEBUG] Emitting transcription: '{transcription.strip()}'")
+                self.transcription_ready.emit(transcription.strip())
+            else:
+                print(f">>> [STT DEBUG] Empty transcription - no speech detected")
+                self.error_occurred.emit("No speech detected")
+                
+        except Exception as e:
+            print(f">>> [STT DEBUG] Whisper transcription failed: {str(e)}")
+            print(f">>> [STT DEBUG] Falling back to Google Speech Recognition...")
+            # Fallback to Google Speech Recognition
+            try:
+                if not self.recognizer or not sr:
+                    raise RuntimeError("Speech recognition not available")
+                
+                if self.language == "auto":
+                    transcription = self.recognizer.recognize_google(audio)  # type: ignore
+                elif self.language == "nl":
+                    transcription = self.recognizer.recognize_google(audio, language="nl-NL")  # type: ignore
+                elif self.language == "en":
+                    transcription = self.recognizer.recognize_google(audio, language="en-US")  # type: ignore
+                else:
+                    transcription = self.recognizer.recognize_google(audio)  # type: ignore
+                    
+                if transcription.strip():
+                    self.transcription_ready.emit(transcription.strip())
+                else:
+                    self.error_occurred.emit("No speech detected")
+            except Exception as fallback_error:
+                self.error_occurred.emit(f"Transcription failed: {str(fallback_error)}")
+
+
 class OrionMainWindow(QMainWindow):
     """Main window with JARVIS-style holographic interface"""
     user_text_submitted = Signal(str)
@@ -538,6 +700,10 @@ class OrionMainWindow(QMainWindow):
         # Current worker threads
         self.worker = None
         self.tts_worker = None
+        self.stt_worker = None
+        self.is_recording = False
+        self.stt_language = "auto"  # "auto", "nl", "en"
+        self.stt_microphone_index = None  # None = default microphone
 
         # Browser widget reference
         self.browser_tabs = None  # QTabWidget container
@@ -638,12 +804,42 @@ class OrionMainWindow(QMainWindow):
         input_container = QWidget()
         input_layout = QHBoxLayout(input_container)
         input_layout.setContentsMargins(15, 10, 15, 0)
+        input_layout.setSpacing(8)
         
         self.input_field = GlowingLineEdit()
         self.input_field.setPlaceholderText("⬢ Enter command or query...")
         self.input_field.returnPressed.connect(self.send_message)
         
+        # Microphone button for STT
+        self.mic_button = QPushButton("🎤")
+        self.mic_button.setFixedSize(45, 45)
+        self.mic_button.setToolTip("Click to speak (Right-click for language)")
+        self.mic_button.clicked.connect(self.start_recording)
+        self.mic_button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.mic_button.customContextMenuRequested.connect(self.show_language_menu)
+        self.mic_button.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(0, 100, 150, 120);
+                border: 2px solid rgba(0, 191, 255, 100);
+                border-radius: 22px;
+                color: #00FFFF;
+                font-size: 20px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 150, 200, 150);
+                border: 2px solid rgba(0, 255, 255, 150);
+            }
+            QPushButton:pressed {
+                background-color: rgba(0, 200, 255, 180);
+            }
+        """)
+        
+        if not STT_AVAILABLE:
+            self.mic_button.setEnabled(False)
+            self.mic_button.setToolTip("STT not available - install required libraries")
+        
         input_layout.addWidget(self.input_field)
+        input_layout.addWidget(self.mic_button)
         middle_layout.addWidget(input_container)
         
         # === RIGHT PANEL: Stats & Video ===
@@ -1094,6 +1290,185 @@ class OrionMainWindow(QMainWindow):
                 
         stats_html += "</div>"
         self.stats_display.setHtml(stats_html)
+    
+    def start_recording(self):
+        """Start recording audio for STT"""
+        if not STT_AVAILABLE:
+            self.append_chat_message("SYSTEM", "Speech recognition not available. Please install required libraries.", "#FF6B6B")
+            return
+        
+        if self.is_recording:
+            return
+        
+        # Create and start STT worker
+        self.is_recording = True
+        self.stt_worker = STTWorker(language=self.stt_language, microphone_index=self.stt_microphone_index)
+        self.stt_worker.transcription_ready.connect(self.handle_transcription)
+        self.stt_worker.error_occurred.connect(self.handle_stt_error)
+        self.stt_worker.recording_started.connect(self.on_recording_started)
+        self.stt_worker.recording_stopped.connect(self.on_recording_stopped)
+        self.stt_worker.start()
+        
+        # Update UI
+        self.mic_button.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(255, 50, 50, 150);
+                border: 2px solid rgba(255, 100, 100, 200);
+                border-radius: 22px;
+                color: #FFFFFF;
+                font-size: 20px;
+            }
+        """)
+        self.mic_button.setText("⏺")
+    
+    @Slot()
+    def on_recording_started(self):
+        """Visual feedback when recording starts"""
+        self.input_field.setPlaceholderText("🎤 Listening... Speak now!")
+        self.append_chat_message("SYSTEM", "🎤 Listening...", "#00FFFF")
+    
+    @Slot()
+    def on_recording_stopped(self):
+        """Visual feedback when recording stops"""
+        self.is_recording = False
+        self.input_field.setPlaceholderText("⬢ Enter command or query...")
+        
+        # Reset button style
+        self.mic_button.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(0, 100, 150, 120);
+                border: 2px solid rgba(0, 191, 255, 100);
+                border-radius: 22px;
+                color: #00FFFF;
+                font-size: 20px;
+            }
+            QPushButton:hover {
+                background-color: rgba(0, 150, 200, 150);
+                border: 2px solid rgba(0, 255, 255, 150);
+            }
+            QPushButton:pressed {
+                background-color: rgba(0, 200, 255, 180);
+            }
+        """)
+        self.mic_button.setText("🎤")
+    
+    @Slot(str)
+    def handle_transcription(self, text):
+        """Handle transcribed text from STT"""
+        if text:
+            self.input_field.setText(text)
+            self.append_chat_message("YOU (voice)", text, "#FFD700")
+            # Auto-send the message
+            QTimer.singleShot(500, self.send_message)
+    
+    @Slot(str)
+    def handle_stt_error(self, error_msg):
+        """Handle STT errors"""
+        self.append_chat_message("SYSTEM", f"⚠ {error_msg}", "#FF6B6B")
+    
+    def show_language_menu(self, position):
+        """Show language and microphone selection menu on right-click"""
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtGui import QAction
+        
+        menu = QMenu()
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: rgba(10, 25, 47, 230);
+                border: 2px solid rgba(0, 191, 255, 150);
+                border-radius: 8px;
+                padding: 5px;
+                color: #00FFFF;
+            }
+            QMenu::item {
+                padding: 8px 20px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: rgba(0, 150, 200, 150);
+            }
+        """)
+        
+        # Language options
+        auto_action = QAction("🌐 Auto-detect", self)
+        auto_action.triggered.connect(lambda: self.set_stt_language("auto"))
+        if self.stt_language == "auto":
+            auto_action.setText("🌐 Auto-detect ✓")
+        
+        dutch_action = QAction("🇳🇱 Dutch", self)
+        dutch_action.triggered.connect(lambda: self.set_stt_language("nl"))
+        if self.stt_language == "nl":
+            dutch_action.setText("🇳🇱 Dutch ✓")
+        
+        english_action = QAction("🇬🇧 English", self)
+        english_action.triggered.connect(lambda: self.set_stt_language("en"))
+        if self.stt_language == "en":
+            english_action.setText("🇬🇧 English ✓")
+        
+        menu.addAction(auto_action)
+        menu.addAction(dutch_action)
+        menu.addAction(english_action)
+        menu.addSeparator()
+        
+        # Microphone selection submenu
+        if STT_AVAILABLE and sr:
+            mic_menu = menu.addMenu("🎙 Select Microphone")
+            mic_menu.setStyleSheet(menu.styleSheet())
+            
+            try:
+                mic_list = sr.Microphone.list_microphone_names()
+                
+                # Default microphone option
+                default_action = QAction("Default Microphone", self)
+                default_action.triggered.connect(lambda: self.set_microphone(None))
+                if self.stt_microphone_index is None:
+                    default_action.setText("Default Microphone ✓")
+                mic_menu.addAction(default_action)
+                mic_menu.addSeparator()
+                
+                # List all available microphones
+                for idx, mic_name in enumerate(mic_list):
+                    # Truncate long names
+                    display_name = mic_name if len(mic_name) < 40 else mic_name[:37] + "..."
+                    mic_action = QAction(f"[{idx}] {display_name}", self)
+                    mic_action.triggered.connect(lambda checked, i=idx: self.set_microphone(i))
+                    if self.stt_microphone_index == idx:
+                        mic_action.setText(f"[{idx}] {display_name} ✓")
+                    mic_menu.addAction(mic_action)
+            except Exception as e:
+                error_action = QAction(f"Error listing mics: {str(e)}", self)
+                error_action.setEnabled(False)
+                mic_menu.addAction(error_action)
+        
+        menu.exec(self.mic_button.mapToGlobal(position))
+    
+    def set_microphone(self, index):
+        """Set the microphone to use"""
+        self.stt_microphone_index = index
+        if index is None:
+            self.append_chat_message("SYSTEM", "Using default microphone", "#00BFFF")
+        else:
+            try:
+                if STT_AVAILABLE and sr:
+                    mic_name = sr.Microphone.list_microphone_names()[index]
+                    self.append_chat_message("SYSTEM", f"Microphone set to: [{index}] {mic_name}", "#00BFFF")
+            except:
+                self.append_chat_message("SYSTEM", f"Microphone set to: [{index}]", "#00BFFF")
+    
+    def set_stt_language(self, language):
+        """Set the STT language"""
+        self.stt_language = language
+        lang_names = {"auto": "Auto-detect", "nl": "Dutch", "en": "English"}
+        self.append_chat_message("SYSTEM", f"Language set to: {lang_names.get(language, language)}", "#00BFFF")
+    
+    def append_chat_message(self, sender, message, color="#B0E0E6"):
+        """Helper method to append a message to chat display"""
+        self.chat_display.append(f"""
+            <p style='margin: 10px 0;'>
+            <b style='color: {color};'>► {escape(sender)}:</b>
+            <span style='color: #B0E0E6;'>{escape(message)}</span>
+            </p>
+        """)
         
     @Slot()
     def send_message(self):
